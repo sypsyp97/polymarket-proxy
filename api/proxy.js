@@ -1,11 +1,6 @@
 /**
  * Polymarket CLOB API Proxy - Vercel Serverless Function
  * Region pinned to hnd1 (Tokyo) to bypass German geo-block on POST /order
- * 
- * Usage:
- *   GET  /api/proxy?secret=XXX&target=clob&path=/time
- *   POST /api/proxy?secret=XXX&target=clob&path=/order  (with JSON body)
- *   GET  /api/proxy?health=1
  */
 
 const TARGETS = {
@@ -19,13 +14,27 @@ const STRIP_HEADERS = new Set([
   'x-forwarded-proto', 'x-forwarded-host', 'x-vercel-forwarded-for',
   'x-vercel-ip-country', 'x-vercel-ip-city', 'x-vercel-id',
   'x-vercel-proxy-signature', 'x-vercel-proxy-signature-ts',
+  'connection', 'transfer-encoding', 'content-length',
 ]);
+
+export const config = {
+  api: { bodyParser: false }
+};
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', chunk => chunks.push(chunk));
+    req.on('end', () => resolve(Buffer.concat(chunks).toString()));
+    req.on('error', reject);
+  });
+}
 
 export default async function handler(req, res) {
   // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, POLY_ADDRESS, POLY_SIGNATURE, POLY_TIMESTAMP, POLY_NONCE, POLY_API_KEY, POLY_PASSPHRASE');
+  res.setHeader('Access-Control-Allow-Headers', '*');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   const url = new URL(req.url, `https://${req.headers.host}`);
@@ -54,30 +63,48 @@ export default async function handler(req, res) {
   
   const targetUrl = targetBase + path;
   
-  // Forward headers, strip identifying ones
+  // Build headers
   const headers = {};
   for (const [key, value] of Object.entries(req.headers)) {
     if (!STRIP_HEADERS.has(key.toLowerCase())) {
       headers[key] = value;
     }
   }
+  // Ensure content-type for POST
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    headers['content-type'] = req.headers['content-type'] || 'application/json';
+  }
   
+  // Read raw body for non-GET
   let body = undefined;
   if (req.method !== 'GET' && req.method !== 'HEAD') {
-    body = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
-    headers['content-type'] = 'application/json';
+    try {
+      body = await readBody(req);
+    } catch (e) {
+      return res.status(400).json({ error: 'Failed to read body', detail: e.message });
+    }
   }
   
   try {
-    const resp = await fetch(targetUrl, { method: req.method, headers, body });
-    const data = await resp.text();
-    for (const [key, value] of resp.headers.entries()) {
-      if (!key.startsWith('x-vercel') && key !== 'set-cookie') {
-        res.setHeader(key, value);
-      }
+    const fetchOpts = { method: req.method, headers };
+    if (body !== undefined && body.length > 0) {
+      fetchOpts.body = body;
     }
+    
+    const resp = await fetch(targetUrl, fetchOpts);
+    const data = await resp.text();
+    
+    // Forward select response headers
+    const ct = resp.headers.get('content-type');
+    if (ct) res.setHeader('content-type', ct);
+    
     return res.status(resp.status).send(data);
   } catch (e) {
-    return res.status(502).json({ error: e.message });
+    return res.status(502).json({ 
+      error: 'fetch failed', 
+      detail: e.message,
+      cause: e.cause ? String(e.cause) : undefined,
+      target: targetUrl 
+    });
   }
 }
