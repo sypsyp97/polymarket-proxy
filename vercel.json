@@ -3,6 +3,10 @@
     "api/proxy.js": {
       "maxDuration": 30,
       "regions": ["hnd1"]
+    },
+    "api/[...path].js": {
+      "maxDuration": 30,
+      "regions": ["hnd1"]
     }
   }
 }
